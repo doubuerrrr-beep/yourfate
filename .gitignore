@@ -1,0 +1,9 @@
+.streamlit/secrets.toml
+local_secrets.py
+__pycache__/
+*.pyc
+.venv/
+*.jpg
+*.jpeg
+*.png
+*.webp
