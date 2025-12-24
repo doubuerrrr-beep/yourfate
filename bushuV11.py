@@ -47,6 +47,38 @@ def _clarity_grade(score: int) -> str:
         return "C（中）"
     return "D（偏低）"
 
+def _life_open_close_keyword(life_rows: list[dict]) -> str | None:
+    adult_rows = [r for r in (life_rows or []) if int(r.get("age", 0)) >= 18]
+    if len(adult_rows) < 8:
+        return None
+
+    early = [r for r in adult_rows if 18 <= int(r.get("age", 0)) <= 30]
+    late = [r for r in adult_rows if int(r.get("age", 0)) >= 31]
+    if len(early) < 3 or len(late) < 3:
+        return None
+
+    early_avg = sum(float(r.get("close", 0.0)) for r in early) / float(len(early))
+    late_avg = sum(float(r.get("close", 0.0)) for r in late) / float(len(late))
+    trend = late_avg - early_avg
+
+    closes = [float(r.get("close", 0.0)) for r in adult_rows]
+    diffs = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    volatility = sum(abs(d) for d in diffs) / float(len(diffs) or 1)
+
+    start_high = early_avg >= 55.0
+    high_vol = volatility >= 8.0
+
+    if start_high:
+        if high_vol:
+            return "高开疯走"
+        if trend <= -4.0:
+            return "高开低走"
+        return "高开高走"
+
+    if high_vol or trend < 0.0:
+        return "低开疯走"
+    return "低开高走"
+
 
 def _enhance_for_lines(image: PIL.Image.Image) -> tuple[PIL.Image.Image, PIL.Image.Image]:
     gray = image.convert("L")
@@ -842,8 +874,21 @@ if st.button("生成解读报告"):
             st.stop()
 
         if bazi_res:
-            with st.spinner("正在生成解读..."):
-                
+            if xian_tian_method == "按传统（男左女右）" and gender_for_display not in ("男", "女"):
+                st.error("你选择了“按传统（男左女右）”，但性别未填写为男/女；请改成手动指定或选择“不区分”。")
+                st.stop()
+
+            progress_slot = st.empty()
+            status_slot = st.empty()
+            progress_bar = progress_slot.progress(0)
+
+            def _set_progress(pct: int, msg: str) -> None:
+                progress_bar.progress(int(round(_clamp(float(pct), 0.0, 100.0))))
+                status_slot.caption(msg)
+
+            try:
+                _set_progress(8, "步骤 1/6：整理信息与左右手口径…")
+                 
                 # 判定先天与后天（可选）
                 xian_tian = None
                 hou_tian = None
@@ -852,9 +897,6 @@ if st.button("生成解读报告"):
                 elif xian_tian_method == "右手为先天":
                     xian_tian, hou_tian = "右手", "左手"
                 elif xian_tian_method == "按传统（男左女右）":
-                    if gender_for_display not in ("男", "女"):
-                        st.error("你选择了“按传统（男左女右）”，但性别未填写为男/女；请改成手动指定或选择“不区分”。")
-                        st.stop()
                     xian_tian, hou_tian = ("左手", "右手") if gender_for_display == "男" else ("右手", "左手")
 
                 xian_tian_label = xian_tian or "不区分"
@@ -868,9 +910,14 @@ if st.button("生成解读报告"):
 
                 left_score = _clarity_score(left_qm)
                 right_score = _clarity_score(right_qm)
+                _set_progress(22, "步骤 2/6：计算清晰度与报告长度…")
 
                 target_length = "约 1800-2600 字" if rich_output_mode else "约 900-1400 字"
-                seed = None if randomize_output else _stable_seed(bazi_res["四柱"], birth_date, birth_time, gender_for_display, relationship_for_display, xian_tian_method, rich_output_mode)
+                seed = (
+                    None
+                    if randomize_output
+                    else (int(_stable_seed(bazi_res["四柱"], birth_date, birth_time, gender_for_display, relationship_for_display, xian_tian_method, rich_output_mode)) % 2147483647)
+                )
 
                 bazi_pillars = (bazi_res.get("四柱") or "").split()
                 bazi_pillars = bazi_pillars + [""] * (4 - len(bazi_pillars))
@@ -881,33 +928,24 @@ if st.button("生成解读报告"):
                     {"柱": "时柱", "干": (bazi_pillars[3][:1] if bazi_pillars[3] else ""), "支": (bazi_pillars[3][1:2] if len(bazi_pillars[3]) >= 2 else "")},
                 ]
 
-                with st.container(border=True):
-                    st.subheader("八字排盘")
-                    if bazi_pro:
-                        st.dataframe(bazi_pro.pillar_details, use_container_width=True, hide_index=True)
-                    else:
-                        st.table(bazi_table)
-                    extra = ""
-                    if bazi_pro:
-                        markers = bazi_pro.markers or {}
-                        tianyi = markers.get("天乙贵人", {})
-                        peach = markers.get("桃花", {})
-                        extra = (
-                            f"｜天乙贵人：{','.join(tianyi.get('positions', []) or []) or '无'}"
-                            f"｜桃花：{','.join(peach.get('positions', []) or []) or '无'}"
-                        )
-                    st.caption(f"四柱：{bazi_res.get('四柱', '')}｜日主：{bazi_res.get('日主', '')}｜流年：{bazi_res.get('流年', '')}{extra}")
+                _set_progress(34, "步骤 3/6：计算盘面信息与人生节奏…")
+                extra = ""
+                dayun_lines: list[str] = []
+                if bazi_pro:
+                    markers = bazi_pro.markers or {}
+                    tianyi = markers.get("天乙贵人", {})
+                    peach = markers.get("桃花", {})
+                    extra = (
+                        f"｜天乙贵人：{','.join(tianyi.get('positions', []) or []) or '无'}"
+                        f"｜桃花：{','.join(peach.get('positions', []) or []) or '无'}"
+                    )
 
-                    if bazi_pro and bazi_pro.dayun:
-                        with st.expander("大运列表", expanded=False):
-                            lines = []
-                            for dy in bazi_pro.dayun:
-                                try:
-                                    lines.append(f"{dy.getGanZhi()}（{dy.getStartYear()}-{dy.getEndYear()}）")
-                                except Exception:
-                                    continue
-                            if lines:
-                                st.write("；".join(lines))
+                    if bazi_pro.dayun:
+                        for dy in bazi_pro.dayun:
+                            try:
+                                dayun_lines.append(f"{dy.getGanZhi()}（{dy.getStartYear()}-{dy.getEndYear()}）")
+                            except Exception:
+                                continue
 
                 life = None
                 kline_hint = ""
@@ -932,125 +970,19 @@ if st.button("生成解读报告"):
                         low_years_hint = "、".join(str(r["year"]) for r in low_rows[:5])
 
                 life_avg_score = None
+                life_open_close_keyword = None
                 if life:
                     rows = life.get("rows") or []
                     adult_rows = [r for r in rows if int(r.get("age", 0)) >= 18]
                     base_rows = adult_rows or rows
                     if base_rows:
                         life_avg_score = sum(float(r.get("close", 0.0)) for r in base_rows) / float(len(base_rows))
+                    life_open_close_keyword = _life_open_close_keyword(rows)
 
-                if show_life_kline and bazi_pro and life:
-                    rows = life["rows"]
-                    with st.container(border=True):
-                        st.subheader("人生K线图（模型化）")
-                        st.caption("这是把“大运/流年 + 五行关系”等规则映射成 0-100 指数的可视化，用来观察人生节奏与波动；不是客观预测。")
+                _set_progress(46, "步骤 4/6：准备未来三年指标与写作锚点…")
 
-                        try:
-                            try:
-                                import plotly.graph_objects as go  # type: ignore
-
-                                fig = go.Figure(
-                                    data=[
-                                        go.Candlestick(
-                                            x=[r["x"] for r in rows],
-                                            open=[r["open"] for r in rows],
-                                            high=[r["high"] for r in rows],
-                                            low=[r["low"] for r in rows],
-                                            close=[r["close"] for r in rows],
-                                            increasing_line_color="#111111",
-                                            decreasing_line_color="#999999",
-                                            showlegend=False,
-                                        )
-                                    ]
-                                )
-
-                                dy_x = [r["x"] for r in rows if r["is_dayun_transition"]]
-                                for x in dy_x:
-                                    fig.add_vline(x=x, line_width=1, line_dash="dot", line_color="#cccccc")
-
-                                fig.update_layout(
-                                    height=420,
-                                    margin=dict(l=10, r=10, t=10, b=10),
-                                    xaxis=dict(
-                                        rangeslider=dict(visible=False),
-                                        tickmode="array",
-                                        tickvals=[rows[i]["x"] for i in range(0, len(rows), 10)],
-                                        tickangle=-35,
-                                    ),
-                                    yaxis=dict(range=[0, 100]),
-                                )
-
-                                st.plotly_chart(fig, use_container_width=True)
-                            except ModuleNotFoundError:
-                                import pandas as pd  # type: ignore
-                                import altair as alt  # type: ignore
-
-                                df = pd.DataFrame(rows)
-                                df["direction"] = df.apply(
-                                    lambda r: "up" if float(r["close"]) >= float(r["open"]) else "down",
-                                    axis=1,
-                                )
-
-                                base = alt.Chart(df).encode(
-                                    x=alt.X(
-                                        "age:Q",
-                                        axis=alt.Axis(title="年龄", tickCount=11, labelAngle=-35),
-                                        scale=alt.Scale(domain=[0, 100]),
-                                    )
-                                )
-
-                                wick = base.mark_rule(color="#777").encode(
-                                    y=alt.Y("low:Q", scale=alt.Scale(domain=[0, 100]), title="指数"),
-                                    y2="high:Q",
-                                    tooltip=[
-                                        alt.Tooltip("age:Q", title="年龄"),
-                                        alt.Tooltip("year:Q", title="年份"),
-                                        alt.Tooltip("year_gz:N", title="流年"),
-                                        alt.Tooltip("dayun_gz:N", title="大运"),
-                                        alt.Tooltip("open:Q", title="开", format=".1f"),
-                                        alt.Tooltip("close:Q", title="收", format=".1f"),
-                                        alt.Tooltip("high:Q", title="高", format=".1f"),
-                                        alt.Tooltip("low:Q", title="低", format=".1f"),
-                                    ],
-                                )
-
-                                body = base.mark_bar(size=6).encode(
-                                    y="open:Q",
-                                    y2="close:Q",
-                                    color=alt.condition(
-                                        "datum.direction == 'up'",
-                                        alt.value("#111111"),
-                                        alt.value("#999999"),
-                                    ),
-                                )
-
-                                transitions = (
-                                    base.transform_filter("datum.is_dayun_transition")
-                                    .mark_rule(color="#cccccc", strokeDash=[2, 2])
-                                    .encode(x="age:Q")
-                                )
-
-                                chart = alt.layer(wick, body, transitions).properties(height=360)
-                                st.altair_chart(chart, use_container_width=True)
-
-                        except Exception as e:
-                            st.warning(f"图表组件不可用：{e}")
-
-                        adult_rows = [r for r in rows if int(r["age"]) >= 18]
-                        high_rows = sorted(adult_rows, key=lambda r: float(r["close"]), reverse=True)[:6]
-                        low_rows = sorted(adult_rows, key=lambda r: float(r["close"]))[:6]
-
-                        if high_rows:
-                            with st.expander("高光年份（模型参考）", expanded=False):
-                                st.table([{"年份": r["year"], "年龄": r["age"], "指数": round(float(r["close"]), 1)} for r in high_rows])
-                        if low_rows:
-                            with st.expander("低谷年份（模型参考）", expanded=False):
-                                st.table([{"年份": r["year"], "年龄": r["age"], "指数": round(float(r["close"]), 1)} for r in low_rows])
-
-                elif show_life_kline and not bazi_pro:
-                    st.info("当前环境未安装 `lunar_python`，暂无法生成大运/人生K线图；部署端安装依赖后即可使用。")
-
-                future_years = [datetime.now().year + i for i in range(1, 4)]
+                current_year = date.today().year
+                future_years = [current_year + i for i in range(1, 4)]
                 future_range = f"{future_years[0]}-{future_years[-1]}"
                 future_metrics = []
                 future_metrics_text = "（未计算）"
@@ -1104,6 +1036,8 @@ if st.button("生成解读报告"):
                 - 关系偏好（可选）：{relationship_for_display or "不填写/不设限"}
                 - 八字原局：{bazi_res['四柱']} (日主：{bazi_res['日主']})
                 - 当前流年：{bazi_res['流年']}
+                - 当前公历年份：{current_year}（明年={future_years[0]}）
+                - 未来三年（固定）：{future_years[0]}、{future_years[1]}、{future_years[2]}（文中如果写“明年/后年/第三年”，必须严格对应这三年，不要写成其他年份）
                 - 可能波动较大的年份（模型参考）：{kline_hint or "未计算/无"}
                 - 可能的高光年份（模型参考）：{highlight_years_hint or "未计算/无"}
                 - 可能的低谷年份（模型参考）：{low_years_hint or "未计算/无"}
@@ -1120,7 +1054,7 @@ if st.button("生成解读报告"):
                 - 驿马：更像“动”的信号（换城市、换赛道、出差奔波、迁移）；动得好是机会，动得乱是消耗。
                 - 华盖：偏“独立/审美/学术/宗教感/孤高”，适合沉下去做事，但也要注意社交隔离。
 
-                **【未来三年趋势（模型化）】**
+                **【未来三年趋势（模型化，固定为 {future_range}）】**
                 下面每行格式：指数±波动（发生概率%），请在事业/财运/关系的解释里用上。
                 {future_metrics_text}
 
@@ -1217,12 +1151,15 @@ if st.button("生成解读报告"):
                             ]
                         )
 
-                    gen_config = genai.types.GenerateContentConfig(
+                    _set_progress(72, "步骤 5/6：生成报告（这一步耗时较长）…")
+                    gen_kwargs = dict(
                         temperature=0.2 if high_precision_mode else 0.35,
                         topP=0.9,
                         maxOutputTokens=8192 if rich_output_mode else 4096,
-                        seed=seed,
                     )
+                    if seed is not None:
+                        gen_kwargs["seed"] = int(seed)
+                    gen_config = genai.types.GenerateContentConfig(**gen_kwargs)
                     response = client.models.generate_content(
                         model=model_name,
                         contents=[final_prompt, *parts],
@@ -1254,8 +1191,9 @@ if st.button("生成解读报告"):
                                 st.json({"candidates": summary})
                         except Exception:
                             pass
-                        st.stop()
-                     
+                        raise RuntimeError("生成失败：未返回可显示的正文。")
+                      
+                    _set_progress(92, "步骤 6/6：整理排版并展示结果…")
                     st.markdown("---")
                     with st.container(border=True):
                         st.subheader("解读报告")
@@ -1266,20 +1204,170 @@ if st.button("生成解读报告"):
                         with meta_cols[1]:
                             st.caption(f"🧬 {bazi_res['四柱']}｜先天：{xian_tian_label}｜后天：{hou_tian_label}")
 
+                        st.caption(f"未来三年范围：{future_range}")
+
                         cleaned_report = _strip_footer_from_report(report_text)
                         st.markdown(cleaned_report)
 
                         keywords = _extract_future_keywords(report_text)
-                        if life_avg_score is not None or keywords:
+                        if life_avg_score is not None or life_open_close_keyword or keywords:
                             st.markdown("---")
                             if life_avg_score is not None:
                                 st.caption(f"人生平均分：{life_avg_score:.0f}/100")
+                            if life_open_close_keyword:
+                                st.caption(f"你的先天/后天人生对比关键词属于：{life_open_close_keyword}")
                             if keywords:
                                 st.markdown(
                                     f"<div style='font-size:1.15rem;font-weight:800;'>未来三年关键词：{keywords}</div>",
                                     unsafe_allow_html=True,
                                 )
+
+                    with st.expander("八字排盘（展开查看）", expanded=False):
+                        if bazi_pro:
+                            st.dataframe(bazi_pro.pillar_details, use_container_width=True, hide_index=True)
+                        else:
+                            st.table(bazi_table)
+
+                        st.caption(
+                            f"四柱：{bazi_res.get('四柱', '')}｜日主：{bazi_res.get('日主', '')}｜流年：{bazi_res.get('流年', '')}{extra}"
+                        )
+
+                        if dayun_lines:
+                            with st.expander("大运列表", expanded=False):
+                                st.write("；".join(dayun_lines))
+
+                    if show_life_kline and bazi_pro and life:
+                        rows = life["rows"]
+                        with st.expander("人生K线图（模型化）", expanded=False):
+                            st.caption(
+                                "这是把“大运/流年 + 五行关系”等规则映射成 0-100 指数的可视化，用来观察人生节奏与波动；不是客观预测。"
+                            )
+
+                            try:
+                                try:
+                                    import plotly.graph_objects as go  # type: ignore
+
+                                    fig = go.Figure(
+                                        data=[
+                                            go.Candlestick(
+                                                x=[r["x"] for r in rows],
+                                                open=[r["open"] for r in rows],
+                                                high=[r["high"] for r in rows],
+                                                low=[r["low"] for r in rows],
+                                                close=[r["close"] for r in rows],
+                                                increasing_line_color="#111111",
+                                                decreasing_line_color="#999999",
+                                                showlegend=False,
+                                            )
+                                        ]
+                                    )
+
+                                    dy_x = [r["x"] for r in rows if r["is_dayun_transition"]]
+                                    for x in dy_x:
+                                        fig.add_vline(x=x, line_width=1, line_dash="dot", line_color="#cccccc")
+
+                                    fig.update_layout(
+                                        height=420,
+                                        margin=dict(l=10, r=10, t=10, b=10),
+                                        xaxis=dict(
+                                            rangeslider=dict(visible=False),
+                                            tickmode="array",
+                                            tickvals=[rows[i]["x"] for i in range(0, len(rows), 10)],
+                                            tickangle=-35,
+                                        ),
+                                        yaxis=dict(range=[0, 100]),
+                                    )
+
+                                    st.plotly_chart(fig, use_container_width=True)
+                                except ModuleNotFoundError:
+                                    import pandas as pd  # type: ignore
+                                    import altair as alt  # type: ignore
+
+                                    df = pd.DataFrame(rows)
+                                    df["direction"] = df.apply(
+                                        lambda r: "up" if float(r["close"]) >= float(r["open"]) else "down",
+                                        axis=1,
+                                    )
+
+                                    base = alt.Chart(df).encode(
+                                        x=alt.X(
+                                            "age:Q",
+                                            axis=alt.Axis(title="年龄", tickCount=11, labelAngle=-35),
+                                            scale=alt.Scale(domain=[0, 100]),
+                                        )
+                                    )
+
+                                    wick = base.mark_rule(color="#777").encode(
+                                        y=alt.Y("low:Q", scale=alt.Scale(domain=[0, 100]), title="指数"),
+                                        y2="high:Q",
+                                        tooltip=[
+                                            alt.Tooltip("age:Q", title="年龄"),
+                                            alt.Tooltip("year:Q", title="年份"),
+                                            alt.Tooltip("year_gz:N", title="流年"),
+                                            alt.Tooltip("dayun_gz:N", title="大运"),
+                                            alt.Tooltip("open:Q", title="开", format=".1f"),
+                                            alt.Tooltip("close:Q", title="收", format=".1f"),
+                                            alt.Tooltip("high:Q", title="高", format=".1f"),
+                                            alt.Tooltip("low:Q", title="低", format=".1f"),
+                                        ],
+                                    )
+
+                                    body = base.mark_bar(size=6).encode(
+                                        y="open:Q",
+                                        y2="close:Q",
+                                        color=alt.condition(
+                                            "datum.direction == 'up'",
+                                            alt.value("#111111"),
+                                            alt.value("#999999"),
+                                        ),
+                                    )
+
+                                    transitions = (
+                                        base.transform_filter("datum.is_dayun_transition")
+                                        .mark_rule(color="#cccccc", strokeDash=[2, 2])
+                                        .encode(x="age:Q")
+                                    )
+
+                                    chart = alt.layer(wick, body, transitions).properties(height=360)
+                                    st.altair_chart(chart, use_container_width=True)
+
+                            except Exception as e:
+                                st.warning(f"图表组件不可用：{e}")
+
+                            adult_rows = [r for r in rows if int(r["age"]) >= 18]
+                            high_rows = sorted(adult_rows, key=lambda r: float(r["close"]), reverse=True)[:6]
+                            low_rows = sorted(adult_rows, key=lambda r: float(r["close"]))[:6]
+
+                            if high_rows:
+                                with st.expander("高光年份（模型参考）", expanded=False):
+                                    st.table(
+                                        [
+                                            {"年份": r["year"], "年龄": r["age"], "指数": round(float(r["close"]), 1)}
+                                            for r in high_rows
+                                        ]
+                                    )
+                            if low_rows:
+                                with st.expander("低谷年份（模型参考）", expanded=False):
+                                    st.table(
+                                        [
+                                            {"年份": r["year"], "年龄": r["age"], "指数": round(float(r["close"]), 1)}
+                                            for r in low_rows
+                                        ]
+                                    )
+
+                    elif show_life_kline and not bazi_pro:
+                        with st.expander("人生K线图（模型化）", expanded=False):
+                            st.info("当前环境未安装 `lunar_python`，暂无法生成大运/人生K线图；部署端安装依赖后即可使用。")
                     
                 except Exception as e:
-                    st.error(f"分析中断: {str(e)}")
-                    st.caption("提示：请检查网络连接与 API Key 配置。")
+                    if isinstance(e, (RuntimeError, ValueError)):
+                        st.error(str(e))
+                    else:
+                        st.error(f"分析中断: {str(e)}")
+                        st.caption("提示：请检查网络连接与 API Key 配置。")
+            except Exception as e:
+                st.error(f"分析中断: {str(e)}")
+                st.caption("提示：请检查出生信息/依赖库是否正常，或稍后重试。")
+            finally:
+                progress_slot.empty()
+                status_slot.empty()
