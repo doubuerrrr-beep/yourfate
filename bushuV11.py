@@ -191,7 +191,13 @@ with st.container(border=True):
     st.subheader("基本信息")
     cols = st.columns(3, gap="small")
     with cols[0]:
-        birth_date = st.date_input("出生日期", value=date(1991, 5, 21))
+        birth_date = st.date_input(
+            "出生日期（1960-2020）",
+            value=None,
+            min_value=date(1960, 1, 1),
+            max_value=date(2020, 12, 31),
+            format="YYYY-MM-DD",
+        )
     with cols[1]:
         birth_time = st.time_input("出生时辰", value=time(8, 15))
     with cols[2]:
@@ -249,6 +255,10 @@ if st.button("生成解读报告"):
     if not img_left or not img_right:
         st.error("请同时上传左手和右手的照片。")
     else:
+        if not birth_date:
+            st.error("请先选择出生日期（1960-2020）。")
+            st.stop()
+
         bazi_res = get_full_bazi_engine(birth_date, birth_time, gender)
         
         if not bazi_res:
